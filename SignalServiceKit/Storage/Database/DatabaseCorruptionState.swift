@@ -35,6 +35,12 @@ public struct DatabaseCorruptionState: Equatable {
     // The value of this key doesn't match the name because that's what we used to store.
     static var databaseCorruptionStatusKey: String { "hasGrdbDatabaseCorruption" }
 
+    // Counts FTS-index recreation attempts for the current corruption episode.
+    // Recreating the index can hit an uncatchable error (e.g. SQLITE_CORRUPT at
+    // commit) and crash; persisting the attempt lets recovery give up on the
+    // non-essential search index instead of crash-looping on every launch.
+    static var ftsIndexRecreationAttemptCountKey: String { "DatabaseRecoveryFTSIndexRecreationAttemptCount" }
+
     public init(userDefaults: UserDefaults) {
         let rawStatus = userDefaults.integer(forKey: Self.databaseCorruptionStatusKey)
         let status = DatabaseCorruptionStatus(rawValue: rawStatus) ?? .notCorrupted
@@ -49,10 +55,25 @@ public struct DatabaseCorruptionState: Equatable {
         let oldState = DatabaseCorruptionState(userDefaults: userDefaults)
         switch oldState.status {
         case .notCorrupted:
+            // A fresh corruption episode begins; start over with a clean budget.
+            resetFTSIndexRecreationAttemptCount(userDefaults: userDefaults)
             Self(status: .corrupted).save(to: userDefaults)
         case .corrupted, .corruptedButAlreadyDumpedAndRestored:
             break
         }
+    }
+
+    public static func ftsIndexRecreationAttemptCount(userDefaults: UserDefaults) -> Int {
+        userDefaults.integer(forKey: ftsIndexRecreationAttemptCountKey)
+    }
+
+    public static func incrementFTSIndexRecreationAttemptCount(userDefaults: UserDefaults) {
+        let newValue = ftsIndexRecreationAttemptCount(userDefaults: userDefaults) + 1
+        userDefaults.set(newValue, forKey: ftsIndexRecreationAttemptCountKey)
+    }
+
+    private static func resetFTSIndexRecreationAttemptCount(userDefaults: UserDefaults) {
+        userDefaults.removeObject(forKey: ftsIndexRecreationAttemptCountKey)
     }
 
     public static func flagCorruptedDatabaseAsDumpedAndRestored(userDefaults: UserDefaults) {
@@ -71,6 +92,8 @@ public struct DatabaseCorruptionState: Equatable {
         case .notCorrupted:
             break
         case .corrupted, .corruptedButAlreadyDumpedAndRestored:
+            // Episode resolved; clear the budget for any future episode.
+            resetFTSIndexRecreationAttemptCount(userDefaults: userDefaults)
             Self(status: .notCorrupted).save(to: userDefaults)
         }
     }

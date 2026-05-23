@@ -310,9 +310,7 @@ class DatabaseRecoveryViewController<SetupResult>: OWSViewController {
                     await self.setupSskEnvironment(databaseStorage).value
                 }.map(on: DispatchQueue.sharedUserInitiated) { setupResult in
                     if shouldDumpAndRecreate {
-                        let recreateFTSIndexOperation = DatabaseRecovery.RecreateFTSIndexOperation(databaseStorage: databaseStorage)
-                        progress.addChild(recreateFTSIndexOperation.progress, withPendingUnitCount: 1)
-                        recreateFTSIndexOperation.run()
+                        self.recreateFTSIndex(databaseStorage: databaseStorage, progress: progress, pendingUnitCount: 1)
                     } else {
                         progress.completedUnitCount += 1
                     }
@@ -323,15 +321,11 @@ class DatabaseRecoveryViewController<SetupResult>: OWSViewController {
             promise = Guarantee.wrapAsync {
                 await self.setupSskEnvironment(self.corruptDatabaseStorage).value
             }.map(on: DispatchQueue.sharedUserInitiated) { setupResult in
-                let recreateFTSIndexOperation = DatabaseRecovery.RecreateFTSIndexOperation(
+                self.recreateFTSIndex(
                     databaseStorage: self.corruptDatabaseStorage,
+                    progress: progress,
+                    pendingUnitCount: progress.remainingUnitCount,
                 )
-                progress.addChild(
-                    recreateFTSIndexOperation.progress,
-                    withPendingUnitCount: progress.remainingUnitCount,
-                )
-                recreateFTSIndexOperation.run()
-
                 return setupResult
             }
         }
@@ -344,6 +338,41 @@ class DatabaseRecoveryViewController<SetupResult>: OWSViewController {
         }.catch(on: DispatchQueue.main) { [weak self] error in
             self?.didRecoveryFail(with: error)
         }
+    }
+
+    // How many times to attempt FTS-index recreation for one corruption episode
+    // before giving up. (A computed property rather than a `static let` because
+    // this type is generic, which disallows static stored properties.)
+    private var maxFTSIndexRecreationAttempts: Int { 2 }
+
+    /// Recreate the full-text search index, but give up after a few attempts.
+    ///
+    /// Recreation issues database writes whose commit (or the row enumeration it
+    /// reads) can fail with an uncatchable error — e.g. SQLITE_CORRUPT on a
+    /// damaged index, or SQLITE_FULL on a still-full disk — which crashes the
+    /// app via `failIfThrows`. Because the attempt happens *after* the database
+    /// is flagged `corruptedButAlreadyDumpedAndRestored`, an un-capped failure
+    /// re-runs on every launch and crash-loops the user out of their messages.
+    /// The FTS index is derived and non-essential, so once we've tried enough
+    /// times we skip it and let recovery finish; search is degraded until the
+    /// index is rebuilt later, which is far better than never launching.
+    private func recreateFTSIndex(
+        databaseStorage: SDSDatabaseStorage,
+        progress: Progress,
+        pendingUnitCount: Int64,
+    ) {
+        let attemptCount = DatabaseCorruptionState.ftsIndexRecreationAttemptCount(userDefaults: userDefaults)
+        guard attemptCount < maxFTSIndexRecreationAttempts else {
+            logger.warn("Skipping FTS index recreation after \(attemptCount) attempt(s); finishing recovery with a degraded search index.")
+            progress.completedUnitCount += pendingUnitCount
+            return
+        }
+        // Persist the attempt *before* running it: if recreation crashes, the
+        // bumped count ensures the next launch eventually stops retrying.
+        DatabaseCorruptionState.incrementFTSIndexRecreationAttemptCount(userDefaults: userDefaults)
+        let operation = DatabaseRecovery.RecreateFTSIndexOperation(databaseStorage: databaseStorage)
+        progress.addChild(operation.progress, withPendingUnitCount: pendingUnitCount)
+        operation.run()
     }
 
     private func didFractionCompletedChange(fractionCompleted: Double) {

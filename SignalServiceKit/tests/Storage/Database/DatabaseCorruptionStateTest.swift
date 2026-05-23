@@ -38,6 +38,34 @@ class DatabaseCorruptionStateTest: XCTestCase {
         XCTAssertEqual(fetch(), expected(.corrupted))
     }
 
+    func testFTSIndexRecreationAttemptCount() throws {
+        let defaults = TestUtils.userDefaults()
+        func count() -> Int {
+            DatabaseCorruptionState.ftsIndexRecreationAttemptCount(userDefaults: defaults)
+        }
+
+        // Starts at zero.
+        XCTAssertEqual(count(), 0)
+
+        // Increments.
+        DatabaseCorruptionState.incrementFTSIndexRecreationAttemptCount(userDefaults: defaults)
+        DatabaseCorruptionState.incrementFTSIndexRecreationAttemptCount(userDefaults: defaults)
+        XCTAssertEqual(count(), 2)
+
+        // Cleared when recovery completes.
+        DatabaseCorruptionState.flagDatabaseAsCorrupted(userDefaults: defaults)
+        DatabaseCorruptionState.incrementFTSIndexRecreationAttemptCount(userDefaults: defaults)
+        XCTAssertEqual(count(), 1)
+        DatabaseCorruptionState.flagDatabaseAsNotCorrupted(userDefaults: defaults)
+        XCTAssertEqual(count(), 0)
+
+        // Cleared when a fresh corruption episode begins.
+        DatabaseCorruptionState.incrementFTSIndexRecreationAttemptCount(userDefaults: defaults)
+        XCTAssertEqual(count(), 1)
+        DatabaseCorruptionState.flagDatabaseAsCorrupted(userDefaults: defaults)
+        XCTAssertEqual(count(), 0)
+    }
+
     func testLegacyFalseValue() throws {
         let defaults = TestUtils.userDefaults()
         defaults.set(false, forKey: DatabaseCorruptionState.databaseCorruptionStatusKey)
